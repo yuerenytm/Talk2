@@ -1,0 +1,4 @@
+PySide6-Essentials>=6.6.0
+openai>=1.40.0
+platformdirs>=4.2.0
+keyring>=25.0.0
