@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QThread
-from PySide6.QtGui import QKeyEvent, QTextOption
+from pathlib import Path
+
+from PySide6.QtCore import QFileSystemWatcher, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QKeyEvent, QTextOption
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -23,7 +25,9 @@ from PySide6.QtWidgets import (
 
 from talk2.core import secrets
 from talk2.core.llm_client import LLMConfig
+from talk2.core.rag import watch_directories
 from talk2.core.storage import Storage
+from talk2.ui.index_worker import IndexWorker
 from talk2.ui.settings_window import SettingsDialog
 from talk2.ui.stream_worker import StreamWorker
 
@@ -82,11 +86,13 @@ class MessageBubble(QWidget):
         inner.setContentsMargins(4, 2, 4, 2)
         inner.addWidget(self.body)
 
-        col = QVBoxLayout()
-        col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(4)
-        col.addWidget(label)
-        col.addWidget(frame)
+        self._col = QVBoxLayout()
+        self._col.setContentsMargins(0, 0, 0, 0)
+        self._col.setSpacing(4)
+        self._col.addWidget(label)
+        self._col.addWidget(frame)
+        self._cite_box: QWidget | None = None
+        col = self._col
 
         row = QHBoxLayout(self)
         row.setContentsMargins(16, 6, 16, 6)
@@ -114,8 +120,42 @@ class MessageBubble(QWidget):
         height = int(self.body.document().size().height()) + 18
         self.body.setFixedHeight(max(height, 36))
 
+    def set_citations(self, hits: list[dict[str, str]]) -> None:
+        if self._cite_box is not None:
+            self._col.removeWidget(self._cite_box)
+            self._cite_box.deleteLater()
+            self._cite_box = None
+        if not hits:
+            return
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        caption = QLabel("引用")
+        caption.setStyleSheet("color: #8b909a; font-size: 12px;")
+        layout.addWidget(caption)
+        for hit in hits:
+            heading = hit.get("heading_path") or "正文"
+            button = QPushButton(f"{hit.get('rel_path', '')}  ·  {heading}")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(
+                "QPushButton { background: transparent; color: #8eb4ff; text-align: left; padding: 2px 0; }"
+                "QPushButton:hover { color: #c5d8ff; }"
+            )
+            target = hit.get("abs_path", "")
+            button.clicked.connect(lambda _checked=False, path=target: _open_path(path))
+            layout.addWidget(button)
+        self._col.addWidget(box)
+        self._cite_box = box
+
+
+def _open_path(path: str) -> None:
+    if path:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
 
 class ChatWindow(QMainWindow):
+    news_requested = Signal()
     def __init__(self, storage: Storage) -> None:
         super().__init__()
         self.storage = storage
@@ -125,6 +165,20 @@ class ChatWindow(QMainWindow):
         self._assistant_bubble: MessageBubble | None = None
         self._assistant_text = ""
         self._streaming = False
+        self._citations: list[dict[str, str]] = []
+        self._settings: SettingsDialog | None = None
+        self._index_thread: QThread | None = None
+        self._index_worker: IndexWorker | None = None
+        self._index_pending_force: bool | None = None
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.directoryChanged.connect(self._on_library_changed)
+        self._watcher.fileChanged.connect(self._on_library_changed)
+        self._watch_timer = QTimer(self)
+        self._watch_timer.setSingleShot(True)
+        self._watch_timer.setInterval(1500)
+        self._watch_timer.timeout.connect(lambda: self.start_index(False))
+        self._tray_mode = False
+        self._allow_quit = False
 
         self.setWindowTitle("Talk2")
         self.resize(1120, 740)
@@ -234,6 +288,9 @@ class ChatWindow(QMainWindow):
         self._refresh_model_label()
         self._reload_sessions()
         self._new_chat()
+        self._arm_watcher()
+        if self.storage.get_setting("rag_enabled", "0") == "1":
+            self.start_index(False)
 
     def _llm_config(self) -> LLMConfig:
         s = self.storage
@@ -246,17 +303,58 @@ class ChatWindow(QMainWindow):
             temperature=float(s.get_setting("temperature", "0.7") or "0.7"),
             max_tokens=max_tokens or None,
             system_prompt=s.get_setting("system_prompt", ""),
+            embedding_model=s.get_setting("embedding_model", ""),
         )
+
+    def llm_config(self) -> LLMConfig:
+        return self._llm_config()
+
+    def is_busy(self) -> bool:
+        return (
+            self._streaming
+            or self.composer.hasFocus()
+            or bool(self.composer.toPlainText().strip())
+        )
+
+    def show_and_raise(self) -> None:
+        self.showNormal()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def set_news_status(self, text: str) -> None:
+        self.statusBar().showMessage(text)
+        if self._settings is not None:
+            self._settings.set_news_status(text)
+
+    def set_tray_mode(self, enabled: bool) -> None:
+        self._tray_mode = enabled
+
+    def allow_quit(self) -> None:
+        self._allow_quit = True
 
     def _refresh_model_label(self) -> None:
         cfg = self._llm_config()
         ready = "已配置" if cfg.api_key and cfg.model else "未配置 API"
-        self.model_label.setText(f"{cfg.model or '未填写模型'}  ·  {ready}")
+        library = ""
+        if self.storage.get_setting("rag_enabled", "0") == "1":
+            folder = self.storage.get_setting("rag_path", "")
+            if folder:
+                library = f"  ·  知识库 {Path(folder).name}"
+        self.model_label.setText(f"{cfg.model or '未填写模型'}  ·  {ready}{library}")
 
     def open_settings(self) -> None:
         dlg = SettingsDialog(self.storage, self)
-        if dlg.exec():
+        self._settings = dlg
+        dlg.reindex_requested.connect(self._on_reindex_requested)
+        dlg.news_requested.connect(self.news_requested.emit)
+        saved = bool(dlg.exec())
+        self._settings = None
+        if saved:
             self._refresh_model_label()
+            self._arm_watcher()
+            if self.storage.get_setting("rag_path", ""):
+                self.start_index(False)
             self.statusBar().showMessage("设置已保存", 3000)
 
     def _reload_sessions(self, select_id: int | None = None) -> None:
@@ -359,22 +457,37 @@ class ChatWindow(QMainWindow):
         self._append_bubble("user", text, final=True)
 
         self._assistant_text = ""
+        self._citations = []
         self._assistant_bubble = self._append_bubble("assistant", "", final=False)
         payload = self.storage.chat_payload(self.current_id)
-        self._start_stream(cfg, payload)
+        rag_query = ""
+        rag_root = ""
+        if self.storage.get_setting("rag_enabled", "0") == "1":
+            rag_root = self.storage.get_setting("rag_path", "")
+            if rag_root:
+                rag_query = text
+        self._start_stream(cfg, payload, rag_query, rag_root)
 
-    def _start_stream(self, cfg: LLMConfig, messages: list[dict[str, str]]) -> None:
+    def _start_stream(
+        self,
+        cfg: LLMConfig,
+        messages: list[dict[str, str]],
+        rag_query: str = "",
+        rag_root: str = "",
+    ) -> None:
         self._streaming = True
         self.send_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.session_list.setEnabled(False)
-        self.statusBar().showMessage("正在生成…")
+        self.statusBar().showMessage("正在检索知识库…" if rag_query else "正在生成…")
 
         self._thread = QThread(self)
-        self._worker = StreamWorker(cfg, messages)
+        self._worker = StreamWorker(cfg, messages, self.storage, rag_query, rag_root)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.chunk.connect(self._on_chunk)
+        self._worker.status.connect(self.statusBar().showMessage)
+        self._worker.citations.connect(self._on_citations)
         self._worker.completed.connect(self._on_completed)
         self._worker.failed.connect(self._on_failed)
         self._worker.completed.connect(self._thread.quit)
@@ -388,14 +501,37 @@ class ChatWindow(QMainWindow):
             self._assistant_bubble.set_text(self._assistant_text, final=False)
         self._scroll_to_bottom()
 
+    def _on_citations(self, hits: object) -> None:
+        if not isinstance(hits, list):
+            return
+        self._citations = [item for item in hits if isinstance(item, dict)]
+        if self._assistant_bubble:
+            self._assistant_bubble.set_citations(self._citations)
+        self._scroll_to_bottom()
+
     def _on_completed(self, text: str) -> None:
         final = text or self._assistant_text
+        stored = final
+        suffix = self._citation_suffix()
+        if suffix:
+            stored = f"{final}{suffix}" if final else suffix.lstrip()
         if self._assistant_bubble:
             self._assistant_bubble.set_text(final or "（无内容）", final=True)
-        if self.current_id is not None and final:
-            self.storage.add_message(self.current_id, "assistant", final)
+            if self._citations:
+                self._assistant_bubble.set_citations(self._citations)
+        if self.current_id is not None and stored:
+            self.storage.add_message(self.current_id, "assistant", stored)
         self.statusBar().showMessage("完成", 2500)
         self._end_stream()
+
+    def _citation_suffix(self) -> str:
+        if not self._citations:
+            return ""
+        lines = ["", "---", "引用："]
+        for item in self._citations:
+            heading = item.get("heading_path") or "正文"
+            lines.append(f"- `{item.get('rel_path', '')}` › {heading}")
+        return "\n".join(lines)
 
     def _on_failed(self, message: str) -> None:
         if self._assistant_text and self.current_id is not None:
@@ -425,10 +561,84 @@ class ChatWindow(QMainWindow):
             self._thread.deleteLater()
             self._thread = None
 
+    def _on_reindex_requested(self, force: bool) -> None:
+        self._arm_watcher()
+        self._refresh_model_label()
+        self.start_index(force)
+
+    def start_index(self, force: bool) -> None:
+        root = self.storage.get_setting("rag_path", "").strip()
+        if not root or not Path(root).is_dir():
+            return
+        if self._index_thread and self._index_thread.isRunning():
+            pending = self._index_pending_force
+            self._index_pending_force = force if pending is None else pending or force
+            return
+        self._index_thread = QThread(self)
+        self._index_worker = IndexWorker(self.storage, root, self._llm_config(), force)
+        self._index_worker.moveToThread(self._index_thread)
+        self._index_thread.started.connect(self._index_worker.run)
+        self._index_worker.status.connect(self._show_index_status)
+        self._index_worker.finished.connect(self._on_index_finished)
+        self._index_worker.failed.connect(self._on_index_failed)
+        self._index_worker.finished.connect(self._index_thread.quit)
+        self._index_worker.failed.connect(self._index_thread.quit)
+        self._index_thread.finished.connect(self._cleanup_index)
+        self._index_thread.start()
+        self._show_index_status("正在建立索引…")
+
+    def _show_index_status(self, text: str) -> None:
+        self.statusBar().showMessage(text)
+        if self._settings is not None:
+            self._settings.set_index_status(text)
+
+    def _on_index_finished(self, text: str) -> None:
+        self._show_index_status(text)
+
+    def _on_index_failed(self, text: str) -> None:
+        self._show_index_status(f"索引失败：{text}")
+
+    def _cleanup_index(self) -> None:
+        pending = self._index_pending_force
+        self._index_pending_force = None
+        if self._index_worker:
+            self._index_worker.deleteLater()
+            self._index_worker = None
+        if self._index_thread:
+            self._index_thread.deleteLater()
+            self._index_thread = None
+        if pending is not None:
+            QTimer.singleShot(0, lambda: self.start_index(pending))
+
+    def _arm_watcher(self) -> None:
+        current = self._watcher.directories() + self._watcher.files()
+        if current:
+            self._watcher.removePaths(current)
+        if self.storage.get_setting("rag_enabled", "0") != "1":
+            return
+        root = self.storage.get_setting("rag_path", "").strip()
+        if not root or not Path(root).is_dir():
+            return
+        paths = watch_directories(Path(root))
+        if paths:
+            self._watcher.addPaths(paths)
+
+    def _on_library_changed(self, _path: str) -> None:
+        if self.storage.get_setting("rag_enabled", "0") == "1":
+            self._watch_timer.start()
+
     def closeEvent(self, event) -> None:
+        if self._tray_mode and not self._allow_quit:
+            event.ignore()
+            self.hide()
+            return
         if self._worker:
             self._worker.stop()
         if self._thread and self._thread.isRunning():
             self._thread.quit()
             self._thread.wait(1500)
+        if self._index_thread and self._index_thread.isRunning():
+            self._index_pending_force = None
+            self._index_thread.quit()
+            self._index_thread.wait(1500)
         super().closeEvent(event)

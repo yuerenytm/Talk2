@@ -74,6 +74,29 @@ class Storage:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS kb_files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    rel_path TEXT NOT NULL UNIQUE,
+                    mtime REAL NOT NULL,
+                    size INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS kb_chunks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_id INTEGER NOT NULL,
+                    heading_path TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    embedding TEXT,
+                    FOREIGN KEY(file_id) REFERENCES kb_files(id) ON DELETE CASCADE
+                );
+                CREATE VIRTUAL TABLE IF NOT EXISTS kb_chunks_fts USING fts5(body);
+                CREATE TABLE IF NOT EXISTS news_digests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fetched_at TEXT NOT NULL,
+                    items_json TEXT NOT NULL,
+                    raw_source_count INTEGER NOT NULL,
+                    model TEXT NOT NULL,
+                    summarized INTEGER NOT NULL
+                );
                 """
             )
 
@@ -174,3 +197,176 @@ class Storage:
             for msg in self.list_messages(conversation_id)
             if msg.role in {"system", "user", "assistant"}
         ]
+
+    def clear_kb(self) -> None:
+        with self._session() as conn:
+            conn.execute("DELETE FROM kb_chunks_fts")
+            conn.execute("DELETE FROM kb_chunks")
+            conn.execute("DELETE FROM kb_files")
+
+    def kb_file_mtime(self, rel_path: str) -> float | None:
+        with self._session() as conn:
+            row = conn.execute(
+                "SELECT mtime FROM kb_files WHERE rel_path = ?", (rel_path,)
+            ).fetchone()
+        return float(row["mtime"]) if row else None
+
+    def replace_file_chunks(
+        self,
+        rel_path: str,
+        mtime: float,
+        size: int,
+        chunks: list[tuple[str, str, str]],
+    ) -> None:
+        with self._session() as conn:
+            row = conn.execute(
+                "SELECT id FROM kb_files WHERE rel_path = ?", (rel_path,)
+            ).fetchone()
+            if row:
+                file_id = int(row["id"])
+                old_ids = [
+                    int(item["id"])
+                    for item in conn.execute(
+                        "SELECT id FROM kb_chunks WHERE file_id = ?", (file_id,)
+                    )
+                ]
+                for chunk_id in old_ids:
+                    conn.execute("DELETE FROM kb_chunks_fts WHERE rowid = ?", (chunk_id,))
+                conn.execute("DELETE FROM kb_chunks WHERE file_id = ?", (file_id,))
+                conn.execute(
+                    "UPDATE kb_files SET mtime = ?, size = ? WHERE id = ?",
+                    (mtime, size, file_id),
+                )
+            else:
+                cur = conn.execute(
+                    "INSERT INTO kb_files(rel_path, mtime, size) VALUES(?, ?, ?)",
+                    (rel_path, mtime, size),
+                )
+                file_id = int(cur.lastrowid)
+            for heading, content, body in chunks:
+                cur = conn.execute(
+                    "INSERT INTO kb_chunks(file_id, heading_path, content, embedding) "
+                    "VALUES(?, ?, ?, NULL)",
+                    (file_id, heading, content),
+                )
+                conn.execute(
+                    "INSERT INTO kb_chunks_fts(rowid, body) VALUES(?, ?)",
+                    (int(cur.lastrowid), body or "空"),
+                )
+
+    def delete_kb_files_not_in(self, rel_paths: set[str]) -> None:
+        with self._session() as conn:
+            rows = conn.execute("SELECT id, rel_path FROM kb_files").fetchall()
+            for row in rows:
+                if row["rel_path"] in rel_paths:
+                    continue
+                file_id = int(row["id"])
+                old_ids = [
+                    int(item["id"])
+                    for item in conn.execute(
+                        "SELECT id FROM kb_chunks WHERE file_id = ?", (file_id,)
+                    )
+                ]
+                for chunk_id in old_ids:
+                    conn.execute("DELETE FROM kb_chunks_fts WHERE rowid = ?", (chunk_id,))
+                conn.execute("DELETE FROM kb_chunks WHERE file_id = ?", (file_id,))
+                conn.execute("DELETE FROM kb_files WHERE id = ?", (file_id,))
+
+    def kb_counts(self) -> tuple[int, int]:
+        with self._session() as conn:
+            files = conn.execute("SELECT COUNT(*) AS n FROM kb_files").fetchone()["n"]
+            chunks = conn.execute("SELECT COUNT(*) AS n FROM kb_chunks").fetchone()["n"]
+        return int(files), int(chunks)
+
+    def search_keyword(self, match: str, limit: int) -> list[tuple[int, float]]:
+        if not match.strip():
+            return []
+        with self._session() as conn:
+            try:
+                rows = conn.execute(
+                    "SELECT rowid, bm25(kb_chunks_fts) AS score FROM kb_chunks_fts "
+                    "WHERE kb_chunks_fts MATCH ? ORDER BY score LIMIT ?",
+                    (match, limit),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [(int(row["rowid"]), -float(row["score"])) for row in rows]
+
+    def get_chunks(self, ids: list[int]) -> list[dict[str, str | int]]:
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        with self._session() as conn:
+            rows = conn.execute(
+                f"SELECT c.id, f.rel_path, c.heading_path, c.content "
+                f"FROM kb_chunks c JOIN kb_files f ON f.id = c.file_id "
+                f"WHERE c.id IN ({marks})",
+                ids,
+            ).fetchall()
+        by_id = {int(row["id"]): row for row in rows}
+        return [
+            {
+                "id": int(by_id[chunk_id]["id"]),
+                "rel_path": str(by_id[chunk_id]["rel_path"]),
+                "heading_path": str(by_id[chunk_id]["heading_path"]),
+                "content": str(by_id[chunk_id]["content"]),
+            }
+            for chunk_id in ids
+            if chunk_id in by_id
+        ]
+
+    def list_embeddings(self) -> list[tuple[int, list[float]]]:
+        import json
+
+        with self._session() as conn:
+            rows = conn.execute(
+                "SELECT id, embedding FROM kb_chunks "
+                "WHERE embedding IS NOT NULL AND embedding != ''"
+            ).fetchall()
+        found: list[tuple[int, list[float]]] = []
+        for row in rows:
+            try:
+                vector = json.loads(row["embedding"])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(vector, list) and vector:
+                found.append((int(row["id"]), [float(item) for item in vector]))
+        return found
+
+    def chunks_missing_embedding(self) -> list[tuple[int, str]]:
+        with self._session() as conn:
+            rows = conn.execute(
+                "SELECT id, heading_path, content FROM kb_chunks "
+                "WHERE embedding IS NULL OR embedding = ''"
+            ).fetchall()
+        return [
+            (int(row["id"]), f"{row['heading_path']}\n{row['content']}".strip())
+            for row in rows
+        ]
+
+    def set_embeddings(self, pairs: list[tuple[int, str]]) -> None:
+        if not pairs:
+            return
+        with self._session() as conn:
+            conn.executemany(
+                "UPDATE kb_chunks SET embedding = ? WHERE id = ?",
+                [(embedding, chunk_id) for chunk_id, embedding in pairs],
+            )
+
+    def clear_embeddings(self) -> None:
+        with self._session() as conn:
+            conn.execute("UPDATE kb_chunks SET embedding = NULL")
+
+    def add_news_digest(
+        self,
+        items_json: str,
+        raw_source_count: int,
+        model: str,
+        summarized: bool,
+    ) -> None:
+        with self._session() as conn:
+            conn.execute(
+                "INSERT INTO news_digests(fetched_at, items_json, raw_source_count, model, summarized) "
+                "VALUES(?, ?, ?, ?, ?)",
+                (_now(), items_json, raw_source_count, model, 1 if summarized else 0),
+            )

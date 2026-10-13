@@ -15,6 +15,7 @@ class LLMConfig:
     temperature: float = 0.7
     max_tokens: int | None = None
     system_prompt: str = ""
+    embedding_model: str = ""
 
 
 class LLMError(Exception):
@@ -43,11 +44,7 @@ class LLMClient:
         if cfg.system_prompt.strip():
             payload = [{"role": "system", "content": cfg.system_prompt.strip()}, *payload]
 
-        client = OpenAI(
-            api_key=cfg.api_key.strip(),
-            base_url=cfg.base_url.strip().rstrip("/"),
-            timeout=cfg.timeout,
-        )
+        client = self._client()
         kwargs: dict = {
             "model": cfg.model.strip(),
             "messages": payload,
@@ -74,3 +71,49 @@ class LLMClient:
         except Exception as exc:  # network / timeout
             raise LLMError(str(exc)) from exc
         return "".join(pieces)
+
+    def complete(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
+        cfg = self.config
+        if not cfg.api_key.strip():
+            raise LLMError("还没有填写 API Key，请先打开设置。")
+        if not cfg.model.strip():
+            raise LLMError("还没有填写模型名，请先打开设置。")
+        if not cfg.base_url.strip():
+            raise LLMError("还没有填写 API 地址，请先打开设置。")
+        try:
+            response = self._client().chat.completions.create(
+                model=cfg.model.strip(),
+                messages=messages,
+                temperature=cfg.temperature if temperature is None else temperature,
+            )
+            if not response.choices:
+                return ""
+            return response.choices[0].message.content or ""
+        except APIError as exc:
+            raise LLMError(str(exc)) from exc
+        except Exception as exc:
+            raise LLMError(str(exc)) from exc
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        cfg = self.config
+        model = cfg.embedding_model.strip()
+        if not model:
+            raise LLMError("还没有填写 embedding 模型。")
+        if not texts:
+            return []
+        try:
+            response = self._client().embeddings.create(model=model, input=texts)
+            ordered = sorted(response.data, key=lambda item: item.index)
+            return [list(item.embedding) for item in ordered]
+        except APIError as exc:
+            raise LLMError(str(exc)) from exc
+        except Exception as exc:
+            raise LLMError(str(exc)) from exc
+
+    def _client(self) -> OpenAI:
+        cfg = self.config
+        return OpenAI(
+            api_key=cfg.api_key.strip(),
+            base_url=cfg.base_url.strip().rstrip("/"),
+            timeout=cfg.timeout,
+        )
