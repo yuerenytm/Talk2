@@ -21,14 +21,14 @@ _PUNCT = set("，。！？、；：\"'“”‘’（）()[]【】《》<>…—
 @dataclass(frozen=True)
 class Hit:
     chunk_id: int
-    rel_path: str
-    heading_path: str
-    content: str
-    abs_path: str
+    rel_path: str#相对路径
+    heading_path: str#标题路径
+    content: str#内容
+    abs_path: str#绝对路径
 
 
 @dataclass(frozen=True)
-class IndexReport:
+class IndexReport:#索引报告
     files: int
     chunks: int
     read_errors: int
@@ -46,7 +46,7 @@ class IndexReport:
         return text
 
 
-def status_line(storage: Storage) -> str:
+def status_line(storage: Storage) -> str:#状态行
     files, chunks = storage.kb_counts()
     when = storage.get_setting("kb_indexed_at", "")
     if files == 0 and not when:
@@ -55,7 +55,7 @@ def status_line(storage: Storage) -> str:
     return f"已索引 {files} 个文件、{chunks} 个段落{stamp}"
 
 
-def iter_markdown(root: Path):
+def iter_markdown(root: Path):#遍历markdown文件
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS and not name.startswith(".")]
         for name in filenames:
@@ -63,7 +63,7 @@ def iter_markdown(root: Path):
                 yield Path(dirpath) / name
 
 
-def chunk_markdown(text: str) -> list[tuple[str, str]]:
+def chunk_markdown(text: str) -> list[tuple[str, str]]:#分块markdown文件
     sections: list[tuple[str, str]] = []
     stack: list[tuple[int, str]] = []
     buf: list[str] = []
@@ -118,7 +118,7 @@ def chunk_markdown(text: str) -> list[tuple[str, str]]:
     return pieces
 
 
-def _split_long(heading: str, body: str) -> list[tuple[str, str]]:
+def _split_long(heading: str, body: str) -> list[tuple[str, str]]:#分块长文本
     if len(body) <= MAX_CHARS:
         return [(heading, body)]
     parts: list[str] = []
@@ -146,7 +146,7 @@ def _split_long(heading: str, body: str) -> list[tuple[str, str]]:
     return labeled
 
 
-def tokenize(text: str) -> list[str]:
+def tokenize(text: str) -> list[str]:#分词
     import jieba
 
     jieba.setLogLevel(logging.ERROR)
@@ -159,18 +159,18 @@ def tokenize(text: str) -> list[str]:
     return tokens
 
 
-def _fts_query(tokens: list[str]) -> str:
+def _fts_query(tokens: list[str]) -> str:#全文搜索查询
     quoted = []
     for token in tokens[:12]:
         quoted.append('"' + token.replace('"', '""') + '"')
     return " OR ".join(quoted)
 
 
-def _now() -> str:
+def _now() -> str:#当前时间
     return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
 
 
-def index_library(
+def index_library(#索引知识库
     storage: Storage,
     root: Path,
     embed_batch: Callable[[list[str]], list[list[float]]] | None = None,
@@ -242,7 +242,7 @@ def index_library(
     return IndexReport(files, chunks, read_errors, embedded, embed_note)
 
 
-def _store_embeddings(
+def _store_embeddings(#存储语义向量
     storage: Storage,
     embed_batch: Callable[[list[str]], list[list[float]]],
     batch: list[tuple[int, str]],
@@ -258,17 +258,17 @@ def _store_embeddings(
     return len(batch)
 
 
-def search(
+def search(#搜索函数
     storage: Storage,
     root: Path,
     query: str,
     embed_query: Callable[[str], list[float]] | None = None,
     top_k: int = TOP_K,
 ) -> list[Hit]:
-    keyword_scores: dict[int, float] = {}
+    keyword_scores: dict[int, float] = {}#关键词得分
     tokens = tokenize(query)
     if tokens:
-        rows = storage.search_keyword(_fts_query(tokens), limit=12)
+        rows = storage.search_keyword(_fts_query(tokens), limit=12)#搜索关键词
         if rows:
             best = max(score for _, score in rows) or 1.0
             for chunk_id, score in rows:
@@ -305,28 +305,28 @@ def search(
 def _semantic_scores(storage: Storage, query_vector: list[float]) -> dict[int, float]:
     import numpy as np
 
-    items = storage.list_embeddings()
+    items = storage.list_embeddings()#获取所有语义向量
     vectors = []
     ids = []
-    width = len(query_vector)
+    width = len(query_vector)#获取查询向量的宽度
     for chunk_id, vector in items:
         if len(vector) != width:
             continue
-        ids.append(chunk_id)
-        vectors.append(vector)
+        ids.append(chunk_id)#添加语义向量ID
+        vectors.append(vector)#添加语义向量
     if not vectors:
-        return {}
-    matrix = np.asarray(vectors, dtype=np.float32)
-    query = np.asarray(query_vector, dtype=np.float32)
-    query_norm = float(np.linalg.norm(query)) or 1.0
-    norms = np.linalg.norm(matrix, axis=1)
-    norms[norms == 0] = 1.0
+        return {}#如果没有语义向量，返回空字典
+    matrix = np.asarray(vectors, dtype=np.float32)#将语义向量转换为numpy数组
+    query = np.asarray(query_vector, dtype=np.float32)#将查询向量转换为numpy数组
+    query_norm = float(np.linalg.norm(query)) or 1.0#计算查询向量的范数
+    norms = np.linalg.norm(matrix, axis=1)#计算语义向量矩阵的范数
+    norms[norms == 0] = 1.0#将范数为0的元素替换为1.0
     sims = (matrix @ query) / (norms * query_norm)
-    order = np.argsort(-sims)[:12]
+    order = np.argsort(-sims)[:12]#将相似度按降序排序   
     best = float(sims[order[0]]) if len(order) else 1.0
     if best <= 0:
         return {}
-    return {ids[int(pos)]: max(float(sims[int(pos)]), 0.0) / best for pos in order}
+    return {ids[int(pos)]: max(float(sims[int(pos)]), 0.0) / best for pos in order}#返回语义向量ID和相似度
 
 
 def build_context(hits: list[Hit]) -> str:

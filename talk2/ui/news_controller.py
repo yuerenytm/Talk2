@@ -39,7 +39,7 @@ class NewsController(QObject):
         self._thread.finished.connect(self._cleanup)
         self._thread.start()
 
-    def _on_finished(self, digest: object) -> None:
+    def _on_finished(self, digest: object) -> None:#完成时处理
         if not isinstance(digest, dict):
             return
         activate = not self.window.is_busy()
@@ -53,7 +53,7 @@ class NewsController(QObject):
         if self.tray is not None and self._scheduled:
             self.tray.notify("今日新闻简报")
 
-    def _cleanup(self) -> None:
+    def _cleanup(self) -> None:#清理工作器和线程
         if self._worker:
             self._worker.deleteLater()
             self._worker = None

@@ -8,7 +8,7 @@ from talk2.core.storage import Storage
 
 
 def should_fire(enabled: bool, news_time: str, last_date: str, now: datetime) -> bool:
-    if not enabled:
+    if not enabled:#开关没开
         return False
     parts = (news_time or "").split(":")
     if len(parts) != 2:
@@ -20,7 +20,7 @@ def should_fire(enabled: bool, news_time: str, last_date: str, now: datetime) ->
         return False
     if hour < 0 or hour > 23 or minute < 0 or minute > 59:
         return False
-    if last_date == now.date().isoformat():
+    if last_date == now.date().isoformat():#推过了
         return False
     scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     return now >= scheduled

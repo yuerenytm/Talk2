@@ -39,17 +39,17 @@ class Storage:
     @contextmanager
     def _session(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
+        conn.row_factory = sqlite3.Row#将查询结果转换为字典
+        conn.execute("PRAGMA foreign_keys = ON")#启用外键约束
+        conn.execute("PRAGMA journal_mode = WAL")#使用WAL模式，提高并发性能
         try:
             yield conn
             conn.commit()
-        except Exception:
+        except Exception:#如果发生异常，回滚事务
             conn.rollback()
             raise
         finally:
-            conn.close()
+            conn.close()#关闭连接
 
     def _init(self) -> None:
         with self._session() as conn:

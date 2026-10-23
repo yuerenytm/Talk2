@@ -35,7 +35,7 @@ class StreamWorker(QObject):
     def stop(self) -> None:
         self._stop = True
 
-    def run(self) -> None:
+    def run(self) -> None:#运行流式工作器，首先检查是否需要检索知识库，如果需要则检索，然后生成文本，最后返回文本
         try:
             messages = list(self._messages)
             if self._rag_query and self._rag_root and self._storage is not None:

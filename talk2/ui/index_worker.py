@@ -21,7 +21,7 @@ class IndexWorker(QObject):
         self._config = config
         self._force = force
 
-    def run(self) -> None:
+    def run(self) -> None:#运行索引工作器，首先检查是否需要落库，如果需要则落库，然后返回报告
         try:
             embed_batch = None
             if self._config.embedding_model.strip() and self._config.api_key.strip():
@@ -30,7 +30,7 @@ class IndexWorker(QObject):
                 def embed_batch(texts: list[str]) -> list[list[float]]:
                     return client.embed(texts)
 
-            report = index_library(
+            report = index_library(#落库
                 self._storage,
                 Path(self._root),
                 embed_batch=embed_batch,
@@ -40,3 +40,4 @@ class IndexWorker(QObject):
             self.finished.emit(report.summary())
         except Exception as exc:
             self.failed.emit(str(exc))
+        

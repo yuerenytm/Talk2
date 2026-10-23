@@ -14,13 +14,13 @@ from talk2.ui.tray import TrayIcon
 
 
 def main() -> int:
-    app = QApplication(sys.argv)
+    app = QApplication(sys.argv)#Qt初始化
     app.setApplicationName("Talk2")
     app.setOrganizationName("Talk2")
     apply_app_font(app)
     app.setStyleSheet(APP_QSS)
 
-    lock = QLockFile(str(lock_path()))
+    lock = QLockFile(str(lock_path()))#锁定文件，防止多个实例运行
     lock.setStaleLockTime(30_000)
     if not lock.tryLock(100):
         QMessageBox.information(None, "Talk2", "Talk2 已经在运行。")
@@ -41,7 +41,7 @@ def main() -> int:
         tray = TrayIcon(window.show_and_raise, lambda: controller.fetch(False), quit_app)
         controller.tray = tray
         tray.show()
-    window.show()
+    window.show()#显示窗口
     code = app.exec()
     lock.unlock()
     return code

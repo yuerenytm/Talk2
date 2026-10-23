@@ -26,7 +26,7 @@ class LLMClient:
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
 
-    def stream_chat(
+    def stream_chat(#流式聊天
         self,
         messages: list[dict[str, str]],
         on_chunk: Callable[[str], None],
@@ -45,7 +45,7 @@ class LLMClient:
             payload = [{"role": "system", "content": cfg.system_prompt.strip()}, *payload]
 
         client = self._client()
-        kwargs: dict = {
+        kwargs: dict = {#构建请求参数
             "model": cfg.model.strip(),
             "messages": payload,
             "stream": True,
