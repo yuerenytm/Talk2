@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QFileSystemWatcher, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QKeyEvent, QTextOption
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -19,17 +18,15 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QVBoxLayout,
     QWidget,
-    QPlainTextEdit,
-    QTextBrowser,
 )
 
 from talk2.core import secrets
 from talk2.core.llm_client import LLMConfig
-from talk2.core.rag import watch_directories
 from talk2.core.storage import Storage
-from talk2.ui.index_worker import IndexWorker
+from talk2.ui.chat_controller import ChatController
+from talk2.ui.library_sync import LibrarySync
 from talk2.ui.settings_window import SettingsDialog
-from talk2.ui.stream_worker import StreamWorker
+from talk2.ui.widgets import Composer, MessageBubble
 
 
 def _title_from(text: str) -> str:
@@ -39,150 +36,47 @@ def _title_from(text: str) -> str:
     return compact[:24] + ("…" if len(compact) > 24 else "")
 
 
-class Composer(QPlainTextEdit):
-    def __init__(self, on_submit, parent=None) -> None:
-        super().__init__(parent)
-        self._on_submit = on_submit
-        self.setPlaceholderText("输入消息，Enter 发送，Shift+Enter 换行")
-        self.setFixedHeight(92)
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                super().keyPressEvent(event)
-                return
-            self._on_submit()
-            return
-        super().keyPressEvent(event)
-
-
-class MessageBubble(QWidget):
-    def __init__(self, role: str, text: str = "", parent=None) -> None:
-        super().__init__(parent)
-        self.role = role
-        self._markdown = role == "assistant"
-        self._text = text
-
-        label = QLabel("你" if role == "user" else "Talk2")
-        label.setStyleSheet("color: #8b909a; font-size: 12px;")
-
-        self.body = QTextBrowser()
-        self.body.setOpenExternalLinks(True)
-        self.body.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.body.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.body.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
-        self.body.document().setDocumentMargin(8)
-        self.body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-
-        frame = QFrame()
-        if role == "user":
-            frame.setObjectName("userBubble")
-        elif role == "error":
-            frame.setObjectName("errorBubble")
-            label.setText("出错")
-        else:
-            frame.setObjectName("assistantBubble")
-        inner = QVBoxLayout(frame)
-        inner.setContentsMargins(4, 2, 4, 2)
-        inner.addWidget(self.body)
-
-        self._col = QVBoxLayout()
-        self._col.setContentsMargins(0, 0, 0, 0)
-        self._col.setSpacing(4)
-        self._col.addWidget(label)
-        self._col.addWidget(frame)
-        self._cite_box: QWidget | None = None
-        col = self._col
-
-        row = QHBoxLayout(self)
-        row.setContentsMargins(16, 6, 16, 6)
-        wrap = QWidget()
-        wrap.setLayout(col)
-        if role == "user":
-            wrap.setMaximumWidth(920)
-            row.addStretch(1)
-            row.addWidget(wrap, 0)
-        else:
-            wrap.setMaximumWidth(1100)
-            row.addWidget(wrap, 1)
-            row.addSpacing(28)
-
-        self.set_text(text, final=True)
-
-    def set_text(self, text: str, final: bool = False) -> None:
-        self._text = text
-        if self._markdown and final:
-            self.body.setMarkdown(text or " ")
-        else:
-            self.body.setPlainText(text or "")
-        width = max(self.body.viewport().width(), 1)
-        self.body.document().setTextWidth(width)
-        height = int(self.body.document().size().height()) + 18
-        self.body.setFixedHeight(max(height, 36))
-
-    def set_citations(self, hits: list[dict[str, str]]) -> None:
-        if self._cite_box is not None:
-            self._col.removeWidget(self._cite_box)
-            self._cite_box.deleteLater()
-            self._cite_box = None
-        if not hits:
-            return
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        caption = QLabel("引用")
-        caption.setStyleSheet("color: #8b909a; font-size: 12px;")
-        layout.addWidget(caption)
-        for hit in hits:
-            heading = hit.get("heading_path") or "正文"
-            button = QPushButton(f"{hit.get('rel_path', '')}  ·  {heading}")
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setStyleSheet(
-                "QPushButton { background: transparent; color: #8eb4ff; text-align: left; padding: 2px 0; }"
-                "QPushButton:hover { color: #c5d8ff; }"
-            )
-            target = hit.get("abs_path", "")
-            button.clicked.connect(lambda _checked=False, path=target: _open_path(path))
-            layout.addWidget(button)
-        self._col.addWidget(box)
-        self._cite_box = box
-
-
-def _open_path(path: str) -> None:
-    if path:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
-
-
 class ChatWindow(QMainWindow):
+    """聊天主窗口：只负责布局、会话列表与把信号接到界面上。"""
+
     news_requested = Signal()
+
     def __init__(self, storage: Storage) -> None:
         super().__init__()
         self.storage = storage
         self.current_id: int | None = None
-        self._thread: QThread | None = None
-        self._worker: StreamWorker | None = None
         self._assistant_bubble: MessageBubble | None = None
         self._assistant_text = ""
-        self._streaming = False
         self._citations: list[dict[str, str]] = []
         self._settings: SettingsDialog | None = None
-        self._index_thread: QThread | None = None
-        self._index_worker: IndexWorker | None = None
-        self._index_pending_force: bool | None = None
-        self._watcher = QFileSystemWatcher(self)
-        self._watcher.directoryChanged.connect(self._on_library_changed)
-        self._watcher.fileChanged.connect(self._on_library_changed)
-        self._watch_timer = QTimer(self)
-        self._watch_timer.setSingleShot(True)
-        self._watch_timer.setInterval(1500)
-        self._watch_timer.timeout.connect(lambda: self.start_index(False))
         self._tray_mode = False
         self._allow_quit = False
 
+        self.chat = ChatController(self)
+        self.chat.chunk.connect(self._on_chunk)
+        self.chat.status.connect(self._show_status)
+        self.chat.citations.connect(self._on_citations)
+        self.chat.completed.connect(self._on_completed)
+        self.chat.failed.connect(self._on_failed)
+        self.chat.busy_changed.connect(self._on_busy_changed)
+
+        self.library = LibrarySync(storage, self._llm_config, self)
+        self.library.status.connect(self._show_index_status)
+
         self.setWindowTitle("Talk2")
         self.resize(1120, 740)
+        self._build_ui()
 
+        self._refresh_model_label()
+        self._reload_sessions()
+        self._new_chat()
+        self.library.arm()
+        if self.storage.get_setting("rag_enabled", "0") == "1":
+            self.library.start(False)
+
+    # ---------- 界面搭建 ----------
+
+    def _build_ui(self) -> None:
         self.session_list = QListWidget()
         self.session_list.currentItemChanged.connect(self._on_session_changed)
         new_btn = QPushButton("新对话")
@@ -282,15 +176,9 @@ class ChatWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([260, 860])
         self.setCentralWidget(splitter)
+        self.setStatusBar(QStatusBar())
 
-        status = QStatusBar()
-        self.setStatusBar(status)
-        self._refresh_model_label()
-        self._reload_sessions()
-        self._new_chat()
-        self._arm_watcher()
-        if self.storage.get_setting("rag_enabled", "0") == "1":
-            self.start_index(False)
+    # ---------- 配置与状态 ----------
 
     def _llm_config(self) -> LLMConfig:
         s = self.storage
@@ -311,7 +199,7 @@ class ChatWindow(QMainWindow):
 
     def is_busy(self) -> bool:
         return (
-            self._streaming
+            self.chat.is_busy()
             or self.composer.hasFocus()
             or bool(self.composer.toPlainText().strip())
         )
@@ -333,6 +221,14 @@ class ChatWindow(QMainWindow):
     def allow_quit(self) -> None:
         self._allow_quit = True
 
+    def _show_status(self, text: str) -> None:
+        self.statusBar().showMessage(text)
+
+    def _show_index_status(self, text: str) -> None:
+        self.statusBar().showMessage(text)
+        if self._settings is not None:
+            self._settings.set_index_status(text)
+
     def _refresh_model_label(self) -> None:
         cfg = self._llm_config()
         ready = "已配置" if cfg.api_key and cfg.model else "未配置 API"
@@ -352,10 +248,17 @@ class ChatWindow(QMainWindow):
         self._settings = None
         if saved:
             self._refresh_model_label()
-            self._arm_watcher()
+            self.library.arm()
             if self.storage.get_setting("rag_path", ""):
-                self.start_index(False)
+                self.library.start(False)
             self.statusBar().showMessage("设置已保存", 3000)
+
+    def _on_reindex_requested(self, force: bool) -> None:
+        self.library.arm()
+        self._refresh_model_label()
+        self.library.start(force)
+
+    # ---------- 会话 ----------
 
     def _reload_sessions(self, select_id: int | None = None) -> None:
         self.session_list.blockSignals(True)
@@ -369,7 +272,7 @@ class ChatWindow(QMainWindow):
         self.session_list.blockSignals(False)
 
     def _new_chat(self) -> None:
-        if self._streaming:
+        if self.chat.is_busy():
             return
         self.session_list.clearSelection()
         self.current_id = None
@@ -378,7 +281,7 @@ class ChatWindow(QMainWindow):
         self._show_empty(True)
 
     def _delete_chat(self) -> None:
-        if self._streaming or self.current_id is None:
+        if self.chat.is_busy() or self.current_id is None:
             return
         if QMessageBox.question(self, "Talk2", "删除当前对话？") != QMessageBox.StandardButton.Yes:
             return
@@ -387,7 +290,7 @@ class ChatWindow(QMainWindow):
         self._new_chat()
 
     def _on_session_changed(self, current: QListWidgetItem | None, _prev) -> None:
-        if self._streaming or current is None:
+        if self.chat.is_busy() or current is None:
             return
         cid = current.data(Qt.ItemDataRole.UserRole)
         if cid is None:
@@ -405,6 +308,8 @@ class ChatWindow(QMainWindow):
         self._show_empty(not messages)
         for msg in messages:
             self._append_bubble(msg.role, msg.content, final=True)
+
+    # ---------- 消息区 ----------
 
     def _clear_messages(self) -> None:
         while self.msg_layout.count() > 1:
@@ -431,8 +336,10 @@ class ChatWindow(QMainWindow):
         bar = self.scroll.verticalScrollBar()
         bar.setValue(bar.maximum())
 
+    # ---------- 发送与流式 ----------
+
     def _send(self) -> None:
-        if self._streaming:
+        if self.chat.is_busy():
             return
         text = self.composer.toPlainText().strip()
         if not text:
@@ -460,40 +367,21 @@ class ChatWindow(QMainWindow):
         self._citations = []
         self._assistant_bubble = self._append_bubble("assistant", "", final=False)
         payload = self.storage.chat_payload(self.current_id)
+
         rag_query = ""
         rag_root = ""
         if self.storage.get_setting("rag_enabled", "0") == "1":
             rag_root = self.storage.get_setting("rag_path", "")
             if rag_root:
                 rag_query = text
-        self._start_stream(cfg, payload, rag_query, rag_root)
 
-    def _start_stream(
-        self,
-        cfg: LLMConfig,
-        messages: list[dict[str, str]],
-        rag_query: str = "",
-        rag_root: str = "",
-    ) -> None:
-        self._streaming = True
-        self.send_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.session_list.setEnabled(False)
         self.statusBar().showMessage("正在检索知识库…" if rag_query else "正在生成…")
+        self.chat.send(cfg, payload, self.storage, rag_query, rag_root)
 
-        self._thread = QThread(self)
-        self._worker = StreamWorker(cfg, messages, self.storage, rag_query, rag_root)
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.chunk.connect(self._on_chunk)
-        self._worker.status.connect(self.statusBar().showMessage)
-        self._worker.citations.connect(self._on_citations)
-        self._worker.completed.connect(self._on_completed)
-        self._worker.failed.connect(self._on_failed)
-        self._worker.completed.connect(self._thread.quit)
-        self._worker.failed.connect(self._thread.quit)
-        self._thread.finished.connect(self._cleanup_worker)
-        self._thread.start()
+    def _on_busy_changed(self, busy: bool) -> None:
+        self.send_btn.setEnabled(not busy)
+        self.stop_btn.setEnabled(busy)
+        self.session_list.setEnabled(not busy)
 
     def _on_chunk(self, piece: str) -> None:
         self._assistant_text += piece
@@ -522,7 +410,6 @@ class ChatWindow(QMainWindow):
         if self.current_id is not None and stored:
             self.storage.add_message(self.current_id, "assistant", stored)
         self.statusBar().showMessage("完成", 2500)
-        self._end_stream()
 
     def _citation_suffix(self) -> str:
         if not self._citations:
@@ -540,105 +427,17 @@ class ChatWindow(QMainWindow):
             self._assistant_bubble.set_text(self._assistant_text, final=True)
         self._append_bubble("error", message, final=True)
         self.statusBar().showMessage(message, 8000)
-        self._end_stream()
 
     def _stop(self) -> None:
-        if self._worker:
-            self._worker.stop()
-        self.statusBar().showMessage("正在停止…")
-
-    def _end_stream(self) -> None:
-        self._streaming = False
-        self.send_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.session_list.setEnabled(True)
-
-    def _cleanup_worker(self) -> None:
-        if self._worker:
-            self._worker.deleteLater()
-            self._worker = None
-        if self._thread:
-            self._thread.deleteLater()
-            self._thread = None
-
-    def _on_reindex_requested(self, force: bool) -> None:
-        self._arm_watcher()
-        self._refresh_model_label()
-        self.start_index(force)
-
-    def start_index(self, force: bool) -> None:
-        root = self.storage.get_setting("rag_path", "").strip()
-        if not root or not Path(root).is_dir():
-            return
-        if self._index_thread and self._index_thread.isRunning():
-            pending = self._index_pending_force
-            self._index_pending_force = force if pending is None else pending or force
-            return
-        self._index_thread = QThread(self)
-        self._index_worker = IndexWorker(self.storage, root, self._llm_config(), force)
-        self._index_worker.moveToThread(self._index_thread)
-        self._index_thread.started.connect(self._index_worker.run)
-        self._index_worker.status.connect(self._show_index_status)
-        self._index_worker.finished.connect(self._on_index_finished)
-        self._index_worker.failed.connect(self._on_index_failed)
-        self._index_worker.finished.connect(self._index_thread.quit)
-        self._index_worker.failed.connect(self._index_thread.quit)
-        self._index_thread.finished.connect(self._cleanup_index)
-        self._index_thread.start()
-        self._show_index_status("正在建立索引…")
-
-    def _show_index_status(self, text: str) -> None:
-        self.statusBar().showMessage(text)
-        if self._settings is not None:
-            self._settings.set_index_status(text)
-
-    def _on_index_finished(self, text: str) -> None:
-        self._show_index_status(text)
-
-    def _on_index_failed(self, text: str) -> None:
-        self._show_index_status(f"索引失败：{text}")
-
-    def _cleanup_index(self) -> None:
-        pending = self._index_pending_force
-        self._index_pending_force = None
-        if self._index_worker:
-            self._index_worker.deleteLater()
-            self._index_worker = None
-        if self._index_thread:
-            self._index_thread.deleteLater()
-            self._index_thread = None
-        if pending is not None:
-            QTimer.singleShot(0, lambda: self.start_index(pending))
-
-    def _arm_watcher(self) -> None:
-        current = self._watcher.directories() + self._watcher.files()
-        if current:
-            self._watcher.removePaths(current)
-        if self.storage.get_setting("rag_enabled", "0") != "1":
-            return
-        root = self.storage.get_setting("rag_path", "").strip()
-        if not root or not Path(root).is_dir():
-            return
-        paths = watch_directories(Path(root))
-        if paths:
-            self._watcher.addPaths(paths)
-
-    def _on_library_changed(self, _path: str) -> None:
-        if self.storage.get_setting("rag_enabled", "0") == "1":
-            self._watch_timer.start()
+        if self.chat.is_busy():
+            self.chat.stop()
+            self.statusBar().showMessage("正在停止…")
 
     def closeEvent(self, event) -> None:
         if self._tray_mode and not self._allow_quit:
             event.ignore()
             self.hide()
             return
-        if self._worker:
-            self._worker.stop()
-        if self._thread and self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(1500)
-        if self._index_thread and self._index_thread.isRunning():
-            self._index_pending_force = None
-            self._index_thread.quit()
-            self._index_thread.wait(1500)
+        self.chat.dispose()
+        self.library.dispose()
         super().closeEvent(event)
