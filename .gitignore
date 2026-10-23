@@ -8,3 +8,15 @@ build/
 .idea/
 .vscode/
 *.log
+
+# PyInstaller 构建脚本与产物
+*.spec
+
+# 测试 / 类型检查 / lint 缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 系统与编辑器杂项
+.DS_Store
+Thumbs.db
