@@ -6,10 +6,10 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from html import unescape
 
-DEFAULT_FEEDS = """https://feeds.bbci.co.uk/zhongwen/simp/rss.xml
-https://feeds.bbci.co.uk/news/world/rss.xml
-https://www.zaobao.com/rss/realtime/china
-https://hnrss.org/frontpage
+DEFAULT_FEEDS = """http://www.chinanews.com.cn/rss/scroll-news.xml
+http://www.chinanews.com.cn/rss/china.xml
+http://www.chinanews.com.cn/rss/world.xml
+http://www.chinanews.com.cn/rss/finance.xml
 """
 
 _TAG = re.compile(r"<[^>]+>")
