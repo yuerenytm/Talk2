@@ -24,14 +24,26 @@ class LLMError(Exception):
 
 class LLMClient:
     def __init__(self, config: LLMConfig) -> None:
+        """保存配置；每次调用时再创建 OpenAI 客户端。
+        """
         self.config = config
 
-    def stream_chat(#流式聊天
+    def stream_chat(
         self,
         messages: list[dict[str, str]],
         on_chunk: Callable[[str], None],
         should_stop: Callable[[], bool] | None = None,
     ) -> str:
+        """流式对话：逐段回调 on_chunk，返回拼接后的完整文本。
+
+        要点：
+            - 三个必填项（key/model/base_url）缺失时抛 LLMError，提示去设置页；
+            - 全局 system_prompt 会插在最前面；
+            - should_stop 只在两个片段之间检查，无法中断已阻塞的网络请求。
+
+        Returns:
+            模型输出的完整字符串（停止时返回已生成部分）。
+        """
         cfg = self.config
         if not cfg.api_key.strip():
             raise LLMError("还没有填写 API Key，请先打开设置。")
@@ -73,6 +85,8 @@ class LLMClient:
         return "".join(pieces)
 
     def complete(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
+        """非流式对话：一次性返回完整文本。
+        """
         cfg = self.config
         if not cfg.api_key.strip():
             raise LLMError("还没有填写 API Key，请先打开设置。")
@@ -95,6 +109,8 @@ class LLMClient:
             raise LLMError(str(exc)) from exc
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        """批量文本向量化（调用 /embeddings，按 index 排序后返回）。
+        """
         cfg = self.config
         model = cfg.embedding_model.strip()
         if not model:
@@ -111,6 +127,8 @@ class LLMClient:
             raise LLMError(str(exc)) from exc
 
     def _client(self) -> OpenAI:
+        """构造 OpenAI 兼容客户端（自动去掉 base_url 末尾斜杠）。
+        """
         cfg = self.config
         return OpenAI(
             api_key=cfg.api_key.strip(),

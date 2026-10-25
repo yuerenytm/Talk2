@@ -46,11 +46,14 @@ def feed_urls(text: str) -> list[str]:
     return urls
 
 
-def build_digest(#构建摘要
+def build_digest(
     feeds_text: str,
     complete: Callable[[list[dict[str, str]]], str] | None,
     model: str,
 ) -> Digest:
+    """
+    构建摘要
+    """
     urls = feed_urls(feeds_text) or feed_urls(DEFAULT_FEEDS)
     entries, source_count = collect_entries(urls)
     if not entries:
@@ -102,7 +105,10 @@ def collect_entries(urls: list[str]) -> tuple[list[NewsItem], int]:
     return entries, ok
 
 
-def select_raw(entries: list[NewsItem], limit: int = 10) -> list[NewsItem]:#去重与截断
+def select_raw(entries: list[NewsItem], limit: int = 10) -> list[NewsItem]:
+    """
+    去重与截断
+    """
     seen: set[str] = set()
     chosen: list[NewsItem] = []
     for item in entries:
@@ -116,7 +122,10 @@ def select_raw(entries: list[NewsItem], limit: int = 10) -> list[NewsItem]:#去�
     return chosen
 
 
-def parse_items(text: str) -> list[NewsItem]:#解析JSON
+def parse_items(text: str) -> list[NewsItem]:
+    """
+    解析JSON
+    """
     match = re.search(r"\[[\s\S]*\]", text or "")
     raw = match.group(0) if match else (text or "")
     data = json.loads(raw)
@@ -144,7 +153,10 @@ def parse_items(text: str) -> list[NewsItem]:#解析JSON
     return items
 
 
-def _fill_to_ten(parsed: list[NewsItem], raw: list[NewsItem]) -> list[NewsItem]:#填充到10条
+def _fill_to_ten(parsed: list[NewsItem], raw: list[NewsItem]) -> list[NewsItem]:
+    """
+    填充到10条
+    """
     if len(parsed) >= 10:
         return parsed[:10]
     seen = {item.link or item.title for item in parsed}
@@ -160,12 +172,14 @@ def _fill_to_ten(parsed: list[NewsItem], raw: list[NewsItem]) -> list[NewsItem]:
     return filled
 
 
-def _plain(value: str) -> str:#清除HTML标签
+def _plain(value: str) -> str:
+    """清除 HTML 标签并压缩空白。"""
     text = unescape(_TAG.sub(" ", value))
     return _SPACE.sub(" ", text).strip()
 
 
-def _download(url: str, timeout: float = 12) -> bytes:#下载RSS
+def _download(url: str, timeout: float = 12) -> bytes:
+    """下载 RSS 原始字节（带 User-Agent，超时可调）。"""
     import urllib.request
 
     request = urllib.request.Request(
@@ -176,7 +190,8 @@ def _download(url: str, timeout: float = 12) -> bytes:#下载RSS
         return response.read()
 
 
-_SYSTEM_PROMPT = (#系统提示词
+# 新闻浓缩用的系统提示词
+_SYSTEM_PROMPT = (
     "你是新闻编辑。根据用户给出的 RSS 条目整理恰好 10 条简报。"
     "只输出 JSON 数组，不要输出其它文字。每项包含 title、summary、source、link。"
     "summary 用一两句中文说明。link 和事实必须来自输入，不要编造链接。"
@@ -184,7 +199,10 @@ _SYSTEM_PROMPT = (#系统提示词
 )
 
 
-def _prompt_payload(entries: list[NewsItem]) -> str:#提示词负载
+def _prompt_payload(entries: list[NewsItem]) -> str:
+    """
+    提示词负载
+    """
     lines = []
     for index, item in enumerate(entries[:40], start=1):
         lines.append(

@@ -94,6 +94,8 @@ class MessageBubble(QWidget):
         self.set_text(text, final=True)
 
     def set_text(self, text: str, final: bool = False) -> None:
+        """设置气泡正文；final=True 时按最终样式渲染（含 Markdown）。
+        """
         self._text = text
         if self._markdown and final:
             self.body.setMarkdown(text or " ")
@@ -105,6 +107,8 @@ class MessageBubble(QWidget):
         self.body.setFixedHeight(max(height, 36))
 
     def set_citations(self, hits: list[dict[str, str]]) -> None:
+        """在气泡下方渲染引用列表（可点击打开原文）。
+        """
         if self._cite_box is not None:
             self._col.removeWidget(self._cite_box)
             self._cite_box.deleteLater()

@@ -21,7 +21,10 @@ class IndexWorker(QObject):
         self._config = config
         self._force = force
 
-    def run(self) -> None:#运行索引工作器，首先检查是否需要落库，如果需要则落库，然后返回报告
+    def run(self) -> None:
+        """
+        运行索引工作器，首先检查是否需要落库，如果需要则落库，然后返回报告
+        """
         try:
             embed_batch = None
             if self._config.embedding_model.strip() and self._config.api_key.strip():

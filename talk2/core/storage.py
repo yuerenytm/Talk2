@@ -9,6 +9,8 @@ from collections.abc import Iterator
 
 
 def _now() -> str:
+    """当前时间的 ISO 字符串（写入 created_at / updated_at）。
+    """
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
@@ -32,12 +34,18 @@ class Message:
 
 class Storage:
     def __init__(self, path: Path) -> None:
+        """记录数据库路径并完成建表。
+        """
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init()
 
     @contextmanager
     def _session(self) -> Iterator[sqlite3.Connection]:
+        """打开一次短连接的事务上下文：进入时设 WAL 与外键，退出时提交/回滚并关闭。
+
+        每次操作独立连接，避免多线程共享 sqlite 连接。
+        """
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row#将查询结果转换为字典
         conn.execute("PRAGMA foreign_keys = ON")#启用外键约束
@@ -52,6 +60,8 @@ class Storage:
             conn.close()#关闭连接
 
     def _init(self) -> None:
+        """建表（会话、消息、设置、知识库文件/分块、新闻简报）。
+        """
         with self._session() as conn:
             conn.executescript(
                 """
@@ -132,6 +142,8 @@ class Storage:
         return Conversation(**dict(row)) if row else None
 
     def create_conversation(self, title: str = "新对话") -> Conversation:
+        """新建会话并返回完整记录。
+        """
         stamp = _now()
         with self._session() as conn:
             cur = conn.execute(
@@ -155,6 +167,8 @@ class Storage:
             conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
 
     def list_messages(self, conversation_id: int) -> list[Message]:
+        """按 id 升序取某会话的全部消息。
+        """
         with self._session() as conn:
             rows = conn.execute(
                 "SELECT id, conversation_id, role, content, created_at, token_usage "
@@ -170,6 +184,11 @@ class Storage:
         content: str,
         token_usage: str | None = None,
     ) -> Message:
+        """写入一条消息，并同步刷新所属会话的 updated_at。
+
+        Returns:
+            刚插入的 Message（含数据库 id 与时间戳）。
+        """
         stamp = _now()
         with self._session() as conn:
             cur = conn.execute(
@@ -192,6 +211,8 @@ class Storage:
         return Message(**dict(row))
 
     def chat_payload(self, conversation_id: int) -> list[dict[str, str]]:
+        """把会话历史转成 OpenAI messages 格式（只保留 system/user/assistant）。
+        """
         return [
             {"role": msg.role, "content": msg.content}
             for msg in self.list_messages(conversation_id)

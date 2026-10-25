@@ -46,7 +46,10 @@ class IndexReport:#索引报告
         return text
 
 
-def status_line(storage: Storage) -> str:#状态行
+def status_line(storage: Storage) -> str:
+    """
+    状态行
+    """
     files, chunks = storage.kb_counts()
     when = storage.get_setting("kb_indexed_at", "")
     if files == 0 and not when:
@@ -55,7 +58,9 @@ def status_line(storage: Storage) -> str:#状态行
     return f"已索引 {files} 个文件、{chunks} 个段落{stamp}"
 
 
-def iter_markdown(root: Path):#遍历markdown文件
+def iter_markdown(root: Path):
+    """遍历目录下的 Markdown 文件（跳过隐藏目录）。
+    """
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS and not name.startswith(".")]
         for name in filenames:
@@ -63,7 +68,11 @@ def iter_markdown(root: Path):#遍历markdown文件
                 yield Path(dirpath) / name
 
 
-def chunk_markdown(text: str) -> list[tuple[str, str]]:#分块markdown文件
+def chunk_markdown(text: str) -> list[tuple[str, str]]:
+    """按标题层级切块并返回片段。
+
+    超长段落会再按字符数切分，保留 overlap 以避免语义被截断。
+    """
     sections: list[tuple[str, str]] = []
     stack: list[tuple[int, str]] = []
     buf: list[str] = []
@@ -118,7 +127,10 @@ def chunk_markdown(text: str) -> list[tuple[str, str]]:#分块markdown文件
     return pieces
 
 
-def _split_long(heading: str, body: str) -> list[tuple[str, str]]:#分块长文本
+def _split_long(heading: str, body: str) -> list[tuple[str, str]]:
+    """
+    分块长文本
+    """
     if len(body) <= MAX_CHARS:
         return [(heading, body)]
     parts: list[str] = []
@@ -146,7 +158,9 @@ def _split_long(heading: str, body: str) -> list[tuple[str, str]]:#分块长文�
     return labeled
 
 
-def tokenize(text: str) -> list[str]:#分词
+def tokenize(text: str) -> list[str]:
+    """中英混合分词：jieba 切中文 + 正则切英文/数字。
+    """
     import jieba
 
     jieba.setLogLevel(logging.ERROR)
@@ -159,24 +173,28 @@ def tokenize(text: str) -> list[str]:#分词
     return tokens
 
 
-def _fts_query(tokens: list[str]) -> str:#全文搜索查询
+def _fts_query(tokens: list[str]) -> str:
+    """把查询词拼成 FTS5 的 MATCH 表达式（带引号转义）。
+    """
     quoted = []
     for token in tokens[:12]:
         quoted.append('"' + token.replace('"', '""') + '"')
     return " OR ".join(quoted)
 
 
-def _now() -> str:#当前时间
+def _now() -> str:
     return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
 
 
-def index_library(#索引知识库
+def index_library(
     storage: Storage,
     root: Path,
     embed_batch: Callable[[list[str]], list[list[float]]] | None = None,
     force: bool = False,
     on_status: Callable[[str], None] | None = None,
 ) -> IndexReport:
+    """增量索引：按 mtime 判断文件是否变化，只重建变化文件的分块。
+    """
     root = root.resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"知识库目录不存在：{root}")
@@ -242,11 +260,14 @@ def index_library(#索引知识库
     return IndexReport(files, chunks, read_errors, embedded, embed_note)
 
 
-def _store_embeddings(#存储语义向量
+def _store_embeddings(
     storage: Storage,
     embed_batch: Callable[[list[str]], list[list[float]]],
     batch: list[tuple[int, str]],
 ) -> int:
+    """
+    存储语义向量
+    """
     import json
 
     vectors = embed_batch([text for _, text in batch])
@@ -258,13 +279,20 @@ def _store_embeddings(#存储语义向量
     return len(batch)
 
 
-def search(#搜索函数
+def search(
     storage: Storage,
     root: Path,
     query: str,
     embed_query: Callable[[str], list[float]] | None = None,
     top_k: int = TOP_K,
 ) -> list[Hit]:
+    """混合检索：FTS5 关键词得分 + 向量余弦相似度，加权后取 Top-K。
+
+    没有 embedding 时退化为纯关键词检索（当前默认配置即如此）。
+
+    Returns:
+        Hit 列表，按最终得分降序。
+    """
     keyword_scores: dict[int, float] = {}#关键词得分
     tokens = tokenize(query)
     if tokens:
@@ -303,6 +331,8 @@ def search(#搜索函数
 
 
 def _semantic_scores(storage: Storage, query_vector: list[float]) -> dict[int, float]:
+    """对候选分块计算查询向量与分块向量的余弦相似度。
+    """
     import numpy as np
 
     items = storage.list_embeddings()#获取所有语义向量
@@ -330,6 +360,8 @@ def _semantic_scores(storage: Storage, query_vector: list[float]) -> dict[int, f
 
 
 def build_context(hits: list[Hit]) -> str:
+    """把检索命中拼成系统提示用的上下文文本（带来源标题与字数上限）。
+    """
     if not hits:
         return (
             "知识库中没有检索到与本次问题相关的段落。"

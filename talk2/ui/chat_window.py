@@ -30,6 +30,8 @@ from talk2.ui.widgets import Composer, MessageBubble
 
 
 def _title_from(text: str) -> str:
+    """用首条消息生成会话标题（截断并去换行）。
+    """
     compact = " ".join(text.strip().split())
     if not compact:
         return "新对话"
@@ -181,6 +183,8 @@ class ChatWindow(QMainWindow):
     # ---------- 配置与状态 ----------
 
     def _llm_config(self) -> LLMConfig:
+        """从数据库设置构造 LLMConfig（模型、地址、密钥、人设等）。
+        """
         s = self.storage
         max_tokens = int(s.get_setting("max_tokens", "0") or "0")
         return LLMConfig(
@@ -198,6 +202,8 @@ class ChatWindow(QMainWindow):
         return self._llm_config()
 
     def is_busy(self) -> bool:
+        """是否有请求正在跑（按钮与发送入口都用它做闸门）。
+        """
         return (
             self.chat.is_busy()
             or self.composer.hasFocus()
@@ -240,6 +246,8 @@ class ChatWindow(QMainWindow):
         self.model_label.setText(f"{cfg.model or '未填写模型'}  ·  {ready}{library}")
 
     def open_settings(self) -> None:
+        """打开设置窗口；关闭后刷新模型标签与索引状态。
+        """
         dlg = SettingsDialog(self.storage, self)
         self._settings = dlg
         dlg.reindex_requested.connect(self._on_reindex_requested)
@@ -261,6 +269,8 @@ class ChatWindow(QMainWindow):
     # ---------- 会话 ----------
 
     def _reload_sessions(self, select_id: int | None = None) -> None:
+        """重新加载会话列表，并把选中项切到 select_id。
+        """
         self.session_list.blockSignals(True)
         self.session_list.clear()
         for conv in self.storage.list_conversations():
@@ -272,6 +282,8 @@ class ChatWindow(QMainWindow):
         self.session_list.blockSignals(False)
 
     def _new_chat(self) -> None:
+        """新建一个空会话（不落库，等第一条消息再创建）。
+        """
         if self.chat.is_busy():
             return
         self.session_list.clearSelection()
@@ -281,6 +293,8 @@ class ChatWindow(QMainWindow):
         self._show_empty(True)
 
     def _delete_chat(self) -> None:
+        """删除当前会话（二次确认），并清空消息区。
+        """
         if self.chat.is_busy() or self.current_id is None:
             return
         if QMessageBox.question(self, "Talk2", "删除当前对话？") != QMessageBox.StandardButton.Yes:
@@ -290,6 +304,8 @@ class ChatWindow(QMainWindow):
         self._new_chat()
 
     def _on_session_changed(self, current: QListWidgetItem | None, _prev) -> None:
+        """会话列表切换时，加载对应历史。
+        """
         if self.chat.is_busy() or current is None:
             return
         cid = current.data(Qt.ItemDataRole.UserRole)
@@ -298,6 +314,8 @@ class ChatWindow(QMainWindow):
         self._load_conversation(int(cid))
 
     def _load_conversation(self, conversation_id: int) -> None:
+        """从数据库读出全部消息并逐条重建气泡。
+        """
         conv = self.storage.get_conversation(conversation_id)
         if conv is None:
             return
@@ -325,6 +343,13 @@ class ChatWindow(QMainWindow):
         self.scroll.setVisible(not visible)
 
     def _append_bubble(self, role: str, text: str, final: bool) -> MessageBubble:
+        """在消息区追加一个气泡并返回它。
+
+        Args:
+            role: user / assistant / error。
+            text: 初始文本，流式时为空白。
+            final: 是否已完成（影响样式与是否可继续追加）。
+        """
         self._show_empty(False)
         bubble = MessageBubble(role, text)
         bubble.set_text(text, final=final)
@@ -333,12 +358,19 @@ class ChatWindow(QMainWindow):
         return bubble
 
     def _scroll_to_bottom(self) -> None:
+        """把滚动条移到底部（流式输出时每来一段都调用）。
+        """
         bar = self.scroll.verticalScrollBar()
         bar.setValue(bar.maximum())
 
     # ---------- 发送与流式 ----------
 
     def _send(self) -> None:
+        """发送入口：落库用户消息、准备会话、启动流式请求。
+
+        顺序上先写数据库再上屏，保证界面异常时用户输入不丢；
+        真正的网络请求交给 ChatController 在子线程执行。
+        """
         if self.chat.is_busy():
             return
         text = self.composer.toPlainText().strip()
@@ -379,17 +411,25 @@ class ChatWindow(QMainWindow):
         self.chat.send(cfg, payload, self.storage, rag_query, rag_root)
 
     def _on_busy_changed(self, busy: bool) -> None:
+        """请求开始/结束时切换按钮与会话列表的可交互状态。
+        """
         self.send_btn.setEnabled(not busy)
         self.stop_btn.setEnabled(busy)
         self.session_list.setEnabled(not busy)
 
     def _on_chunk(self, piece: str) -> None:
+        """收到一段流式文本：累加后整体重设气泡内容（打字机效果的来源）。
+
+        每次都全量 set_text 而不是追加，是为了让气泡自己处理换行与富文本。
+        """
         self._assistant_text += piece
         if self._assistant_bubble:
             self._assistant_bubble.set_text(self._assistant_text, final=False)
         self._scroll_to_bottom()
 
     def _on_citations(self, hits: object) -> None:
+        """收到检索引用：保存并渲染到助手气泡下方。
+        """
         if not isinstance(hits, list):
             return
         self._citations = [item for item in hits if isinstance(item, dict)]
@@ -398,6 +438,11 @@ class ChatWindow(QMainWindow):
         self._scroll_to_bottom()
 
     def _on_completed(self, text: str) -> None:
+        """生成结束：展示最终文本，并把回答（含引用摘要）写入数据库。
+
+        引用以文本形式拼在正文末尾——历史里不再保留结构化引用，
+        这是当前的已知取舍。
+        """
         final = text or self._assistant_text
         stored = final
         suffix = self._citation_suffix()
@@ -412,6 +457,8 @@ class ChatWindow(QMainWindow):
         self.statusBar().showMessage("完成", 2500)
 
     def _citation_suffix(self) -> str:
+        """把引用列表拼成 Markdown 片段，供落库与展示。
+        """
         if not self._citations:
             return ""
         lines = ["", "---", "引用："]
@@ -421,6 +468,10 @@ class ChatWindow(QMainWindow):
         return "\n".join(lines)
 
     def _on_failed(self, message: str) -> None:
+        """请求失败：先把已生成的部分存库，再追加一条错误气泡（错误本身不入库）。
+
+        这样刷新历史时不会看到半截错误信息，但已产出的内容不会丢。
+        """
         if self._assistant_text and self.current_id is not None:
             self.storage.add_message(self.current_id, "assistant", self._assistant_text)
         if self._assistant_bubble and self._assistant_text:
@@ -429,11 +480,15 @@ class ChatWindow(QMainWindow):
         self.statusBar().showMessage(message, 8000)
 
     def _stop(self) -> None:
+        """请求停止：通知工作线程中断，等待其正常收尾。
+        """
         if self.chat.is_busy():
             self.chat.stop()
             self.statusBar().showMessage("正在停止…")
 
     def closeEvent(self, event) -> None:
+        """关闭窗口：托盘模式下仅隐藏；否则先停请求并释放控制器。
+        """
         if self._tray_mode and not self._allow_quit:
             event.ignore()
             self.hide()

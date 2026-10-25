@@ -23,11 +23,15 @@ class ChatController(QObject):
     busy_changed = Signal(bool)
 
     def __init__(self, parent=None) -> None:
+        """初始化控制器；同一时刻只持有一个线程与工作器。
+        """
         super().__init__(parent)
         self._thread: QThread | None = None
         self._worker: StreamWorker | None = None
 
     def is_busy(self) -> bool:
+        """是否有请求在跑（有线程即视为忙）。
+        """
         return self._thread is not None
 
     def send(
@@ -38,6 +42,14 @@ class ChatController(QObject):
         rag_query: str = "",
         rag_root: str = "",
     ) -> bool:
+        """启动一次流式请求。
+
+        把 StreamWorker moveToThread 到新 QThread，连接五个信号，
+        完成后由线程的 finished 触发 _cleanup 回收对象。
+
+        Returns:
+            是否成功启动；已有请求在跑时返回 False。
+        """
         if self.is_busy():
             return False
 
@@ -58,6 +70,8 @@ class ChatController(QObject):
         return True
 
     def stop(self) -> None:
+        """请求停止（仅置标志位，工作器的循环会在下一个片段前退出）。
+        """
         if self._worker is not None:
             self._worker.stop()
 
@@ -70,6 +84,8 @@ class ChatController(QObject):
             self._thread.wait(1500)
 
     def _cleanup(self) -> None:
+        """线程结束后回收 worker 与 thread，并广播 busy=False。
+        """
         if self._worker is not None:
             self._worker.deleteLater()
             self._worker = None

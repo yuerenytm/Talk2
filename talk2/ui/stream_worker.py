@@ -24,6 +24,8 @@ class StreamWorker(QObject):
         rag_query: str = "",
         rag_root: str = "",
     ) -> None:
+        """保存本次请求所需的一切（配置、消息、存储、RAG 参数）。
+        """
         super().__init__()
         self._config = config
         self._messages = messages
@@ -33,9 +35,16 @@ class StreamWorker(QObject):
         self._stop = False
 
     def stop(self) -> None:
+        """置停止标志；run 的循环与 LLMClient 会检查它。
+        """
         self._stop = True
 
-    def run(self) -> None:#运行流式工作器，首先检查是否需要检索知识库，如果需要则检索，然后生成文本，最后返回文本
+    def run(self) -> None:
+        """工作线程主函数：可选检索 → 拼上下文 → 流式生成 → 广播结果。
+
+        检索命中时把 build_context 的结果作为一条 system 消息插在最前，
+        再交给 LLMClient；异常统一转成 failed 信号。
+        """
         try:
             messages = list(self._messages)
             if self._rag_query and self._rag_root and self._storage is not None:
@@ -59,11 +68,17 @@ class StreamWorker(QObject):
             self.failed.emit(str(exc))
 
     def _retrieve(self) -> list[Hit]:
+        """执行知识库检索。
+
+        配了 embedding 模型时先向量化查询，否则退回纯关键词检索。
+        """
         embed_query = None
         if self._config.embedding_model.strip() and self._config.api_key.strip():
             client = LLMClient(self._config)
 
             def embed_query(text: str) -> list[float]:
+                """把查询文本转成向量（调用一次 embedding 接口）。
+                """
                 vectors = client.embed([text])
                 return vectors[0] if vectors else []
 
@@ -77,6 +92,8 @@ class StreamWorker(QObject):
 
 
 def _hit_dict(hit: Hit) -> dict[str, str]:
+    """把检索命中转成可序列化的字典，供 UI 渲染引用。
+    """
     return {
         "rel_path": hit.rel_path,
         "heading_path": hit.heading_path,
